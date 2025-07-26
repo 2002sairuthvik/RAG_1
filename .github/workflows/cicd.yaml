@@ -1,0 +1,97 @@
+name: workflow
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Continuous Integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Lint code
+        run: echo "Linting repository"
+
+      - name: Run unit tests
+        run: echo "Running unit tests"
+
+  build-and-push-acr-image:
+    name: Continuous Delivery
+    needs: integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Install Azure CLI
+        uses: azure/setup-azure@v3
+
+      - name: Login to Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build and push Docker image to Azure Container Registry
+        env:
+          ACR_NAME: ${{ secrets.AZURE_CONTAINER_REGISTRY_NAME }} # without .azurecr.io
+          IMAGE_NAME: ${{ secrets.ACR_REPOSITORY_NAME }}         # e.g. cnncls
+          IMAGE_TAG: latest
+        run: |
+          az acr login --name $ACR_NAME
+          docker build -t $ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG .
+          docker push $ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG
+          echo "IMAGE=$ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG" >> $GITHUB_ENV
+
+  continuous-deployment:
+    name: Continuous Deployment to Azure
+    needs: build-and-push-acr-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Login to Azure CLI
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Pull latest image from Azure Container Registry
+        env:
+          ACR_NAME: ${{ secrets.AZURE_CONTAINER_REGISTRY_NAME }}
+          IMAGE_NAME: ${{ secrets.ACR_REPOSITORY_NAME }}
+          IMAGE_TAG: latest
+        run: |
+          az acr login --name $ACR_NAME
+          docker pull $ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG
+
+      # Uncomment and adapt if deploying to Azure Container Instances (ACI)
+      - name: Deploy container to Azure Container Instances
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          ACI_NAME: ${{ secrets.AZURE_ACI_NAME }}
+          ACR_NAME: ${{ secrets.AZURE_CONTAINER_REGISTRY_NAME }}
+          IMAGE_NAME: ${{ secrets.ACR_REPOSITORY_NAME }}
+          IMAGE_TAG: latest
+        run: |
+          az container create \
+            --resource-group $RESOURCE_GROUP \
+            --name $ACI_NAME \
+            --image $ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG \
+            --registry-login-server $ACR_NAME.azurecr.io \
+            --registry-username ${{ secrets.AZURE_ACR_USERNAME }} \
+            --registry-password ${{ secrets.AZURE_ACR_PASSWORD }} \
+            --dns-name-label $ACI_NAME \
+            --ports 8080
+
+      # Optionally clean up old images and containers on the runner
+      - name: Clean Docker system (optional)
+        run: docker system prune -f
